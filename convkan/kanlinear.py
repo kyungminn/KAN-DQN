@@ -175,7 +175,6 @@ class KANLinear(torch.nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         assert x.dim() == 3 and x.size(2) == self.in_features
-        import pdb; pdb.set_trace()
         base_output = torch.bmm(
             self.base_activation(x), self.base_weight.permute(0, 2, 1)
         )
