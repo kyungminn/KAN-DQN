@@ -1,0 +1,16 @@
+scripts/pendulum/
+models/
+csv_log/
+images/
+kan/
+wandb/
+__pycache__/
+configs/sac.yaml
+configs/kan_sac.yaml
+test.py
+dqn_donghu.py
+csv_test.py
+main.py
+/scripts/dqn/*
+!/scripts/dqn/kan_dqn.sh
+!/scripts/dqn/orig_dqn.sh

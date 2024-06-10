@@ -1,0 +1,42 @@
+# Wandb
+project_name: 'KAN-RL'
+entity: 'draftrec'
+group_name: DQN
+exp_name: null
+wandb_run_name: null
+
+env_list: ['Krull','Freeway','Boxing']
+model: 'orig_DQN'
+seed: 0
+device: 'cuda:0'
+min_buffer_size: 2000
+buffer_limit: 100000
+aug: True
+num_episodes_per_env: 100000
+imgsize: 84
+# evaluation & logging
+log_every: 1000 # per_step 1000
+eval_every: 5000  # per_step 5000
+num_eval_envs: 100
+eval_epsilon: 0.001
+
+# donghu - n step returns & eps-greedy
+obs_shape: [4,1,84,84]
+max_n_step: 10
+init_epsilon: 1.0
+min_epsilon: 0.01
+decay_steps: 10000
+
+
+dqn:
+  device: ${device}
+  model: ${model}
+  h_dim: [12,24,24]
+  batch_size: 32
+  lr: 0.0005
+  gamma: 0.98
+  replay_ratio: 1
+  tau: 0.01
+  frame_size: 4
+  action_size: 18
+  
