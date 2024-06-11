@@ -1,6 +1,6 @@
 # Wandb
 project_name: 'KAN-RL'
-entity: 'draftrec'
+entity: null
 group_name: DQN
 exp_name: null
 wandb_run_name: null

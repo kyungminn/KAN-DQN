@@ -19,6 +19,10 @@ from hydra import compose, initialize
 from dotmap import DotMap
 import wandb
 import warnings
+import ale_py
+
+import csv
+import datetime
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 warnings.filterwarnings("ignore", category=DeprecationWarning, module="pkg_resources")
@@ -208,37 +212,72 @@ class Augmentation(nn.Module):
     
 
 class ReplayBuffer():
-    def __init__(self, buffer_limit, device):
-        self.buffer = collections.deque(maxlen=buffer_limit)
+    def __init__(self, buffer_limit, obs_shape, max_n_step, gamma, device):
+        self.buffer_limit = buffer_limit
+        # self.buffer = collections.deque(maxlen=buffer_limit)
+        self.max_n_step = max_n_step+1
+        self.n_step_buffer = collections.deque(maxlen=self.max_n_step)
+        self.gamma = gamma
+
+        self.observations = np.zeros((self.buffer_limit, *obs_shape), dtype=np.uint8)
+        self.actions = np.zeros((self.buffer_limit, 1), dtype=np.int64)
+        self.done_masks =  np.zeros((self.buffer_limit, 1), dtype=np.float32)
+        self.n_step_rew_sums = np.zeros((self.buffer_limit, 1), dtype=np.float32)
+        self.n_step_offsets = np.zeros((self.buffer_limit, 1), dtype=np.float32)
+
         self.device = device
-    
+        self.cursor = 0
+        self.buffer_size = 0
+
     def put(self, transition):
-        s, a, r, s_prime, done = transition
-        s = (s * 255.0).to(torch.uint8)
-        s_prime = (s_prime * 255.0).to(torch.uint8)
-        transition = (s, a, r, s_prime, done)
-        self.buffer.append(transition)
-    
-    def sample(self, n):
-        mini_batch = random.sample(self.buffer, n)
-        s_lst, a_lst, r_lst, s_prime_lst, done_mask_lst = [], [], [], [], []
+        self.n_step_buffer.append(transition)
+        if len(self.n_step_buffer) < self.max_n_step:
+            return
+            
+        obs, action, _, _ = self.n_step_buffer[0]
+        self.observations[self.cursor] = np.array(obs)*255.0
+        self.actions[self.cursor] = action
         
-        for transition in mini_batch:
-            s, a, r, s_prime, done_mask = transition
-            s_lst.append((s).to(torch.float32)/255.0)
-            a_lst.append([a])
-            r_lst.append([r])
-            s_prime_lst.append((s_prime.to(torch.float32))/255.0)
-            done_mask_lst.append([done_mask])
-        return torch.stack(s_lst).to(self.device), torch.tensor(a_lst).to(self.device), \
-               torch.tensor(r_lst).to(self.device), torch.stack(s_prime_lst,).to(self.device), \
-               torch.tensor(done_mask_lst).to(self.device)
+        _, _, G, done_mask = self.n_step_buffer[-1]
+        n_step_offset = 0
+        for i in reversed(range(self.max_n_step-1)):
+            _, _, r, d = self.n_step_buffer[i]
+            G = r + self.gamma*G*d
+            done_mask = np.logical_and(done_mask, d)
+            n_step_offset = 1 + n_step_offset*d
+        
+        self.done_masks[self.cursor] = done_mask
+        self.n_step_rew_sums[self.cursor] = G
+        self.n_step_offsets[self.cursor] = n_step_offset
+        self.buffer_size = min(self.buffer_size+1, self.buffer_limit)
+        self.cursor = (self.cursor + 1) % self.buffer_limit
+
+    def sample(self, batch_size):
+        assert self.buffer_size > 0
+        if batch_size > self.buffer_size:
+            print("WARNING | sample() called with insufficient number of samples")
+
+        # Effective size is buffer_size - max_n_step.
+        # Technically we have to wait until effective size = batch size.
+        batch_idx = np.random.randint(self.buffer_size-self.max_n_step, size=batch_size)
+        # If done is within max_n_steps, next_obs_idx doesn't matter anyway.
+        next_obs_idx = (batch_idx + self.max_n_step) % self.buffer_size
+
+        return torch.tensor(self.observations[batch_idx]/255.0, dtype=torch.float32, device=self.device), \
+               torch.tensor(self.actions[batch_idx], device=self.device), \
+               torch.tensor(self.n_step_rew_sums[batch_idx], device=self.device), \
+               torch.tensor(self.observations[next_obs_idx]/255.0, dtype=torch.float32, device=self.device), \
+               torch.tensor(self.done_masks[batch_idx], device=self.device), \
+               torch.tensor(self.n_step_offsets[batch_idx], device=self.device) # Don't think we need this one, but keeping it just in case.
     
+    @property
     def size(self):
-        return len(self.buffer)
+        return self.buffer_size
     
     def clear(self):
-        self.buffer.clear()
+        self.buffer_size = 0
+        self.cursor = 0
+        self.n_step_buffer.clear()
         
 
 class DQN(nn.Module):
@@ -301,12 +340,13 @@ class DQN(nn.Module):
             param_target.data.copy_(param_target.data * (1.0 - tau) + param.data * tau)
             
             
-def train(q, q_target, aug_func, memory, optimizer, batch_size, gamma):
-    s,a,r,s_prime,done_mask = memory.sample(batch_size)
-    q_out = q(aug_func(s.squeeze(2)))
+def train(q, q_target, memory, aug_func, optimizer, batch_size, gamma, n_steps):
+    s,a,r,s_prime,done_mask,n_step_offset = memory.sample(batch_size)
+    s, s_prime = aug_func(s.squeeze(2)), aug_func(s_prime.squeeze(2))
+    q_out = q(s)
     q_a = q_out.gather(1,a)
-    max_q_prime = q_target(aug_func(s_prime.squeeze(2))).max(1)[0].unsqueeze(1)
-    target = r + gamma * max_q_prime * done_mask
+    max_q_prime = q_target(s_prime).max(1)[0].unsqueeze(1)
+    target = r + (gamma**n_steps)*max_q_prime*done_mask
     loss = F.smooth_l1_loss(q_a, target)
     
     optimizer.zero_grad()
@@ -330,12 +370,17 @@ def main(config):
                config=OmegaConf.to_container(config, resolve=True, throw_on_missing=True),
                group=config.group_name,
                name=config.wandb_run_name)
+
+    time = datetime.datetime.now()
+    f = open(f'./csv_log/{config.exp_name}_seed{config.seed}_{time}.csv', 'w+')
+    csv_writer = csv.writer(f)
+    csv_writer.writerows([['step','Krull','Freeway','Boxing']])
     
     q = torch.compile(DQN(config.dqn)).to(config.device)
     q_target = torch.compile(DQN(config.dqn)).to(config.device)
     q_target.load_state_dict(q.state_dict())
     print(f'number of Q_net params: {count_parameters(q)}')
-    buffer = ReplayBuffer(config.buffer_limit, config.device)
+    buffer = ReplayBuffer(config.buffer_limit, config.obs_shape, config.max_n_step, config.dqn.gamma, config.device)
     optimizer = optim.Adam(q.parameters(), lr=config.dqn.lr)
     aug_func = Augmentation(aug=config.aug)
     
@@ -352,11 +397,9 @@ def main(config):
         env = gym.make(f'ALE/{env_name}-v5', full_action_space=True)
         env = PreprocessEnv(env, config.imgsize, config.device)
         buffer.clear()
-        
         step=0
         print(f'Start {env_name}')
-        print(f'Memory size: {buffer.size()}')
-        # for _ in range(1000):
+        print(f'Memory size: {buffer.size}')
         while True:
             epsilon = config.init_epsilon - min(1, step/config.decay_steps)*(config.init_epsilon-config.min_epsilon)
             # epsilon = max(0.01, 0.08 - 0.01*(step/config.num_episodes_per_env)) #Linear annealing from 8% to 1%
@@ -367,17 +410,18 @@ def main(config):
                 a = q.sample_action(s.to(config.device).unsqueeze(0), epsilon)      
                 s_prime, r, done, info = env.step(a)
                 done_mask = 0.0 if done else 1.0
-                buffer.put((s.cpu(),a.cpu(),r.cpu(),s_prime.cpu(), done_mask))
+                buffer.put((s.cpu(),a.cpu(),r.cpu(),done_mask))
                 s = s_prime
                 r_list.append(r)
             wandb.log({'sum_of_rewards': sum(r_list)}, step=total_step)
-            print(f'Memory size: {buffer.size()}')
+                
+            print(f'Memory size: {buffer.size}')
             episode_length = len(r_list)
-            if buffer.size() >= config.min_buffer_size:
+            if buffer.size >= config.min_buffer_size:
                 for _ in tqdm(range(episode_length * config.dqn.replay_ratio)):
                     if step >= config.num_episodes_per_env:
                         break
-                    q_loss = train(q, q_target, aug_func, buffer, optimizer, config.dqn.batch_size, config.dqn.gamma)
+                    q_loss = train(q, q_target, buffer, aug_func, optimizer, config.dqn.batch_size, config.dqn.gamma, config.max_n_step)
                     q.soft_update(q_target, config.dqn.tau)
                     step += 1
                     total_step += 1
@@ -393,11 +437,16 @@ def main(config):
                         eval_dict = {}
                         with torch.no_grad():
                             scores = eval_envs.eval_metric(q_net=q, eval_epsilon=config.eval_epsilon)
+                            print('done!')
+                            csv_log = [step]
                             for e_name in config.env_list:
                                 eval_dict[f'Eval {e_name} score'] = scores[f'{e_name}']
                                 score_dict[f'{e_name}'].append(scores[f'{e_name}'])
+                                csv_log.append(scores[f'{e_name}'])
+                            csv_writer.writerows([csv_log])
+                            f.flush()
                         wandb.log(eval_dict, step=total_step)
-                        
+
             if step >= config.num_episodes_per_env:
                 break
         
@@ -408,6 +457,7 @@ def main(config):
                         'score': score_dict}
         save_dict(config, checkpoint_dict, name)
         env.close()
+    f.close()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(allow_abbrev=False)

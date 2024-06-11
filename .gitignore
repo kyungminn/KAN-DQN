@@ -2,6 +2,7 @@ scripts/pendulum/
 models/
 csv_log/
 images/
+data/
 kan/
 wandb/
 __pycache__/
@@ -11,6 +12,7 @@ test.py
 dqn_donghu.py
 csv_test.py
 main.py
+dqn_test.py
 /scripts/dqn/*
 !/scripts/dqn/kan_dqn.sh
 !/scripts/dqn/orig_dqn.sh
