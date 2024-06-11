@@ -312,6 +312,7 @@ class DQN(nn.Module):
             ).to(self.config.device)
             self.fc = nn.Sequential(
                 KANLinear(in_features=self.config.h_dim[2]*7*7 , out_features=128),
+                nn.LayerNorm(128),
                 KANLinear(in_features=128, out_features=self.config.action_size)
             ).to(self.config.device)
             
@@ -370,11 +371,6 @@ def main(config):
                config=OmegaConf.to_container(config, resolve=True, throw_on_missing=True),
                group=config.group_name,
                name=config.wandb_run_name)
-
-    time = datetime.datetime.now()
-    f = open(f'./csv_log/{config.exp_name}_seed{config.seed}_{time}.csv', 'w+')
-    csv_writer = csv.writer(f)
-    csv_writer.writerows([['step','Krull','Freeway','Boxing']])
     
     q = torch.compile(DQN(config.dqn)).to(config.device)
     q_target = torch.compile(DQN(config.dqn)).to(config.device)
@@ -402,7 +398,6 @@ def main(config):
         print(f'Memory size: {buffer.size}')
         while True:
             epsilon = config.init_epsilon - min(1, step/config.decay_steps)*(config.init_epsilon-config.min_epsilon)
-            # epsilon = max(0.01, 0.08 - 0.01*(step/config.num_episodes_per_env)) #Linear annealing from 8% to 1%
             s, _ = env.reset(seed=config.seed)
             done = False
             r_list = []
@@ -438,13 +433,9 @@ def main(config):
                         with torch.no_grad():
                             scores = eval_envs.eval_metric(q_net=q, eval_epsilon=config.eval_epsilon)
                             print('done!')
-                            csv_log = [step]
                             for e_name in config.env_list:
                                 eval_dict[f'Eval {e_name} score'] = scores[f'{e_name}']
                                 score_dict[f'{e_name}'].append(scores[f'{e_name}'])
-                                csv_log.append(scores[f'{e_name}'])
-                            csv_writer.writerows([csv_log])
-                            f.flush()
                         wandb.log(eval_dict, step=total_step)
 
             if step >= config.num_episodes_per_env:
@@ -457,7 +448,6 @@ def main(config):
                         'score': score_dict}
         save_dict(config, checkpoint_dict, name)
         env.close()
-    f.close()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(allow_abbrev=False)

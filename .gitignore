@@ -5,6 +5,7 @@ images/
 data/
 kan/
 wandb/
+analysis/
 __pycache__/
 configs/sac.yaml
 configs/kan_sac.yaml
