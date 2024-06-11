@@ -213,6 +213,10 @@ class ReplayBuffer():
         self.device = device
     
     def put(self, transition):
+        s, a, r, s_prime, done = transition
+        s = (s * 255.0).to(torch.uint8)
+        s_prime = (s_prime * 255.0).to(torch.uint8)
+        transition = (s, a, r, s_prime, done)
         self.buffer.append(transition)
     
     def sample(self, n):
@@ -221,10 +225,10 @@ class ReplayBuffer():
         
         for transition in mini_batch:
             s, a, r, s_prime, done_mask = transition
-            s_lst.append(s)
+            s_lst.append((s).to(torch.float32)/255.0)
             a_lst.append([a])
             r_lst.append([r])
-            s_prime_lst.append(s_prime)
+            s_prime_lst.append((s_prime.to(torch.float32))/255.0)
             done_mask_lst.append([done_mask])
         return torch.stack(s_lst).to(self.device), torch.tensor(a_lst).to(self.device), \
                torch.tensor(r_lst).to(self.device), torch.stack(s_prime_lst,).to(self.device), \
@@ -297,11 +301,11 @@ class DQN(nn.Module):
             param_target.data.copy_(param_target.data * (1.0 - tau) + param.data * tau)
             
             
-def train(q, q_target, memory, optimizer, batch_size, gamma):
+def train(q, q_target, aug_func, memory, optimizer, batch_size, gamma):
     s,a,r,s_prime,done_mask = memory.sample(batch_size)
-    q_out = q(s)
+    q_out = q(aug_func(s.squeeze(2)))
     q_a = q_out.gather(1,a)
-    max_q_prime = q_target(s_prime).max(1)[0].unsqueeze(1)
+    max_q_prime = q_target(aug_func(s_prime.squeeze(2))).max(1)[0].unsqueeze(1)
     target = r + gamma * max_q_prime * done_mask
     loss = F.smooth_l1_loss(q_a, target)
     
@@ -311,8 +315,8 @@ def train(q, q_target, memory, optimizer, batch_size, gamma):
     return loss
 
 def save_dict(config, checkpoint_dict, name):
-    os.makedirs(f'./models/{config.project_name}/{config.group_name}/{config.exp_name}', exist_ok=True)
-    path = f'./models/{config.project_name}/{config.group_name}/{config.exp_name}/{name}.pth'
+    os.makedirs(f'./models/{config.project_name}/{config.group_name}/{config.exp_name}/seed{config.seed}', exist_ok=True)
+    path = f'./models/{config.project_name}/{config.group_name}/{config.exp_name}/seed{config.seed}/{name}.pth'
     torch.save(checkpoint_dict, path)
     print("Checkpoint saved successfully at", path)
     
@@ -360,7 +364,7 @@ def main(config):
             done = False
             r_list = []
             while not done:
-                a = q.sample_action(aug_func(s).to(config.device).unsqueeze(0), epsilon)      
+                a = q.sample_action(s.to(config.device).unsqueeze(0), epsilon)      
                 s_prime, r, done, info = env.step(a)
                 done_mask = 0.0 if done else 1.0
                 buffer.put((s.cpu(),a.cpu(),r.cpu(),s_prime.cpu(), done_mask))
@@ -373,7 +377,7 @@ def main(config):
                 for _ in tqdm(range(episode_length * config.dqn.replay_ratio)):
                     if step >= config.num_episodes_per_env:
                         break
-                    q_loss = train(q, q_target, buffer, optimizer, config.dqn.batch_size, config.dqn.gamma)
+                    q_loss = train(q, q_target, aug_func, buffer, optimizer, config.dqn.batch_size, config.dqn.gamma)
                     q.soft_update(q_target, config.dqn.tau)
                     step += 1
                     total_step += 1
